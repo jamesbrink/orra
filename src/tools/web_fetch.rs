@@ -100,7 +100,11 @@ impl Tool for WebFetchTool {
 
         // Truncate if needed
         let text = if text.len() > max_length {
-            let truncated = &text[..max_length];
+            let mut end = max_length.min(text.len());
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            let truncated = &text[..end];
             format!(
                 "{}\n\n[Truncated — {} of {} characters shown]",
                 truncated,
@@ -120,6 +124,14 @@ pub fn register_tool(registry: &mut ToolRegistry) {
     registry.register(Box::new(WebFetchTool::new()));
 }
 
+/// Check whether `chars[pos..]` starts with the given ASCII `target`.
+fn starts_with_at(chars: &[char], pos: usize, target: &str) -> bool {
+    target
+        .chars()
+        .enumerate()
+        .all(|(j, c)| chars.get(pos + j) == Some(&c))
+}
+
 /// Very basic HTML tag stripping. Removes tags, decodes common entities,
 /// and collapses excessive whitespace.
 fn strip_html(html: &str) -> String {
@@ -128,31 +140,30 @@ fn strip_html(html: &str) -> String {
     let mut in_script = false;
     let mut in_style = false;
 
-    let lower = html.to_lowercase();
     let chars: Vec<char> = html.chars().collect();
-    let lower_chars: Vec<char> = lower.chars().collect();
+    let lower_chars: Vec<char> = html.to_lowercase().chars().collect();
     let len = chars.len();
     let mut i = 0;
 
     while i < len {
-        if !in_tag && i + 7 < len && &lower[i..i + 7] == "<script" {
+        if !in_tag && starts_with_at(&lower_chars, i, "<script") {
             in_script = true;
             in_tag = true;
             i += 1;
             continue;
         }
-        if in_script && i + 9 <= len && &lower[i..i + 9] == "</script>" {
+        if in_script && starts_with_at(&lower_chars, i, "</script>") {
             in_script = false;
             i += 9;
             continue;
         }
-        if !in_tag && i + 6 < len && &lower[i..i + 6] == "<style" {
+        if !in_tag && starts_with_at(&lower_chars, i, "<style") {
             in_style = true;
             in_tag = true;
             i += 1;
             continue;
         }
-        if in_style && i + 8 <= len && &lower[i..i + 8] == "</style>" {
+        if in_style && starts_with_at(&lower_chars, i, "</style>") {
             in_style = false;
             i += 8;
             continue;
@@ -267,6 +278,28 @@ mod tests {
         let def = tool.definition();
         assert_eq!(def.name, "web_fetch");
         assert_eq!(def.input_schema["required"][0], "url");
+    }
+
+    #[test]
+    fn strip_html_multibyte_utf8() {
+        // Regression test for issue #1: panic on multi-byte UTF-8 characters.
+        // The old code used char indices as byte offsets into the str, which
+        // panics when multi-byte chars shift the byte position ahead of the
+        // char index.
+        let html = "<html><body>\
+            <p>Diseño español con ñ y más café</p>\
+            <script>var x = 'should be removed';</script>\
+            <p>日本語テキスト</p>\
+            <style>.emoji { content: '🦀'; }</style>\
+            <p>After style</p>\
+            </body></html>";
+        let text = strip_html(html);
+        assert!(text.contains("Diseño español"));
+        assert!(text.contains("café"));
+        assert!(text.contains("日本語テキスト"));
+        assert!(text.contains("After style"));
+        assert!(!text.contains("should be removed"));
+        assert!(!text.contains("emoji"));
     }
 
     #[tokio::test]

@@ -12,6 +12,21 @@ use crate::tool::{Tool, ToolDefinition, ToolError, ToolRegistry};
 // Content extraction
 // ---------------------------------------------------------------------------
 
+/// Find `needle` (an ASCII lowercase string) case-insensitively in `haystack`.
+/// Returns the byte offset in `haystack`, so the result is safe to use for
+/// slicing `haystack` directly.
+fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
+    let needle_bytes = needle.as_bytes();
+    haystack
+        .as_bytes()
+        .windows(needle_bytes.len())
+        .position(|w| {
+            w.iter()
+                .zip(needle_bytes)
+                .all(|(h, n)| h.to_ascii_lowercase() == *n)
+        })
+}
+
 /// Extracted content from a web page.
 #[derive(Debug, Clone)]
 pub struct PageContent {
@@ -35,8 +50,8 @@ pub fn extract_text(html: &str) -> String {
     let mut result = html.to_string();
 
     // Remove script blocks
-    while let Some(start) = result.to_lowercase().find("<script") {
-        if let Some(end) = result.to_lowercase()[start..].find("</script>") {
+    while let Some(start) = find_ascii_ci(&result, "<script") {
+        if let Some(end) = find_ascii_ci(&result[start..], "</script>") {
             result = format!(
                 "{}{}",
                 &result[..start],
@@ -48,8 +63,8 @@ pub fn extract_text(html: &str) -> String {
     }
 
     // Remove style blocks
-    while let Some(start) = result.to_lowercase().find("<style") {
-        if let Some(end) = result.to_lowercase()[start..].find("</style>") {
+    while let Some(start) = find_ascii_ci(&result, "<style") {
+        if let Some(end) = find_ascii_ci(&result[start..], "</style>") {
             result = format!(
                 "{}{}",
                 &result[..start],
@@ -132,11 +147,10 @@ pub fn extract_text(html: &str) -> String {
 
 /// Try to extract the page title from HTML.
 pub fn extract_title(html: &str) -> Option<String> {
-    let lower = html.to_lowercase();
-    let start = lower.find("<title")?;
-    let tag_end = lower[start..].find('>')?;
+    let start = find_ascii_ci(html, "<title")?;
+    let tag_end = html[start..].find('>')?;
     let content_start = start + tag_end + 1;
-    let end = lower[content_start..].find("</title>")?;
+    let end = find_ascii_ci(&html[content_start..], "</title>")?;
 
     let title = html[content_start..content_start + end].trim().to_string();
     if title.is_empty() {
@@ -213,7 +227,11 @@ impl BrowserTool {
 
         // Truncate if too long
         let body = if body.len() > self.max_content_length {
-            body[..self.max_content_length].to_string()
+            let mut end = self.max_content_length.min(body.len());
+            while !body.is_char_boundary(end) {
+                end -= 1;
+            }
+            body[..end].to_string()
         } else {
             body
         };
@@ -277,7 +295,11 @@ impl Tool for BrowserTool {
 
         // Truncate the final output to a reasonable size for the model
         if output.len() > 50_000 {
-            output.truncate(50_000);
+            let mut end = 50_000_usize.min(output.len());
+            while !output.is_char_boundary(end) {
+                end -= 1;
+            }
+            output.truncate(end);
             output.push_str("\n\n[Content truncated]");
         }
 
@@ -400,6 +422,33 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("404"));
         assert!(msg.contains("example.com"));
+    }
+
+    #[test]
+    fn extract_text_multibyte_utf8() {
+        let html = "<html><body>\
+            <p>Diseño español con ñ y más café</p>\
+            <script>var x = 'removed';</script>\
+            <p>日本語テキスト</p>\
+            <STYLE>.emoji { content: '🦀'; }</STYLE>\
+            <p>After style</p>\
+            </body></html>";
+        let text = extract_text(html);
+        assert!(text.contains("Diseño español"));
+        assert!(text.contains("café"));
+        assert!(text.contains("日本語テキスト"));
+        assert!(text.contains("After style"));
+        assert!(!text.contains("removed"));
+        assert!(!text.contains("emoji"));
+    }
+
+    #[test]
+    fn extract_title_multibyte_utf8() {
+        let html = "<html><head><TITLE>Página en español</TITLE></head><body></body></html>";
+        assert_eq!(
+            extract_title(html),
+            Some("Página en español".into())
+        );
     }
 
     #[test]
